@@ -1,0 +1,2056 @@
+---
+title: "markdown"
+author: "Andrew Tu"
+date: "2023-07-10"
+output: pdf_document
+---
+
+# Wrangle
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(BiocManager)
+
+#BiocManager::install("msigdbr")
+
+
+
+
+
+library(tidyverse)
+library(DESeq2)
+library(Rsubread)
+library(edgeR)
+library(org.Mm.eg.db)
+#library(OrganismDbi)
+library(biomaRt)
+library(EnhancedVolcano)
+library(ggfortify) 
+library(pheatmap)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(magick)
+library(Cairo)
+library(fitdistrplus)
+library(parallel)
+library(vegan)
+library(ggforce)
+library(pathview)
+library(Path2PPI)
+library(fgsea)
+library(KEGGREST)
+library(enrichplot)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(msigdbr)
+library(ggupset)
+
+select <- dplyr::select
+```
+
+```{r gettype}
+
+```
+
+
+```{r import}
+remove_list = c("IKOHL_1")
+
+metadata = read_csv("metadata.csv")%>%
+  column_to_rownames("Sample_ID")%>%
+  mutate(genotype = fct_relevel(genotype, c("WT","FF","KO","IKO")))%>%
+  mutate(bile_acid = fct_relevel(bile_acid, c("low","high")))%>%
+  filter(!rownames(.) %in% remove_list)
+
+
+countdata = read_delim("featurecount3.txt", skip = 1)%>%
+  column_to_rownames("Geneid")%>%
+  select(-(1:5))%>%
+  rownames_to_column("rowname")%>%
+  mutate(rowname = gsub("\\..*","",rowname))%>%
+  column_to_rownames("rowname")
+
+colnames(countdata) <- gsub("\\./aligned/+|\\.bam", "", colnames(countdata))
+
+countdata = select(countdata, -remove_list)
+
+colnames(countdata) == rownames(metadata)
+```
+
+
+
+```{r Split FF-IKO and WT-KO }
+
+
+
+
+ikoff_list <- metadata%>%
+  filter(genotype %in% c("IKO", "FF"))%>%
+  rownames()
+
+split_df(ikoff_list, "ikoff_test")
+
+
+
+kowt_list <- metadata%>%
+  filter(genotype %in% c("KO", "WT"))%>%
+  rownames()
+
+split_df(kowt_list, "kowt")
+
+```
+
+```{r Split diets}
+highfat_list <- metadata%>%
+  filter(diet %in% c("high_fat"))%>%
+  rownames()
+split_df(highfat_list, "highfat")
+
+
+lowfat_list <- metadata%>%
+  filter(diet %in% c("low_fat"))%>%
+  rownames()
+
+split_df(lowfat_list, "lowfat")
+
+
+
+chowdiet_list <- metadata%>%
+  filter(diet %in% c("chow"))%>%
+  rownames()
+
+split_df(chowdiet_list, "chow")
+
+
+ko_list <- metadata%>%
+  filter(genotype == "KO")%>%
+  rownames()
+
+split_df(ko_list, "ko")
+
+```
+
+```{r Split KO lows}
+
+kowt_nolow_list <- metadata%>%
+  filter(bile_acid == "low" & genotype == "KO" | genotype == "WT")%>%
+  rownames()
+
+split_df(kowt_nolow_list, "kowt_nolow")
+
+
+
+
+ikoff_nolow_list <- metadata%>%
+  filter(bile_acid == "high" & genotype == "IKO" | genotype == "FF")%>%
+  rownames()
+
+split_df(ikoff_nolow_list, "ikoff_nolow")
+
+
+
+
+kowt_low_list <- metadata%>%
+  filter(genotype %in% c("KO", "WT"))%>%
+  filter(bile_acid == "low")%>%
+  rownames()
+
+split_df(kowt_low_list, "kowt_low")
+
+
+kohwtl_list <- metadata%>%
+  filter(genotype == "KO" & bile_acid =="high" | genotype =="WT")%>%
+  rownames()
+
+split_df(kohwtl_list, "kohwtl")
+
+```
+
+```{r make count_named}
+
+ensembl <- useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://nov2020.archive.ensembl.org")
+
+ann_df = getBM(attributes = c("ensembl_gene_id", "external_gene_name","description", "entrezgene_id"),
+          filters = "ensembl_gene_id",
+          values = rownames(countdata),
+          mart = ensembl)
+
+
+ann_dict <- setNames(ann_df$external_gene_name, ann_df$ensembl_gene_id)
+  
+
+ann_dict <- ann_dict[!is.na(ann_dict)]
+
+
+count_named = countdata%>%
+  rownames_to_column("ensembl_gene_id")%>%
+  left_join(ann_df, by = "ensembl_gene_id")%>%
+  select(ensembl_gene_id, external_gene_name, everything())
+
+```
+
+
+# Ordinal Analysis
+```{r testing housekeeping gene ratios}
+
+housekeepingratio = countdata%>%
+  t()%>%as.data.frame()%>%
+  rownames_to_column("sample")%>%
+  pivot_longer(-sample)%>%
+  group_by(name)%>%
+  mutate(total = sum(value))%>%
+  filter(total>1000)%>%
+  group_by(sample)%>%
+  mutate(total = sum(value))%>%
+  filter(name == "ENSMUSG00000067274")%>%
+  mutate(ratio = value/total)%>%
+  arrange(sample)
+
+ggplot(housekeepingratio, aes(ratio))+
+  geom_density()
+
+
+
+housekeepingratio_vst = countdata%>%
+  as.matrix()%>%
+  vst()%>%
+  t()%>%as.data.frame()%>%
+  rownames_to_column("sample")%>%
+  pivot_longer(-sample)%>%
+  group_by(name)%>%
+  mutate(total = sum(value))%>%
+  group_by(sample)%>%
+  mutate(total = sum(value))%>%
+  filter(name == "ENSMUSG00000067274")%>%
+  mutate(ratio = value/total)%>%
+  arrange(sample)
+
+ggplot(housekeepingratio, aes(ratio))+
+  geom_density()
+ggsave("hkg/hkg_subsample.png")
+ggplot(housekeepingratio_vst, aes(ratio))+
+  geom_density()
+ggsave("hkg/hkg_vst.png")
+```
+
+
+```{r VST test}
+countdata_vst <- countdata_kowt%>%
+  as.matrix()%>%
+  varianceStabilizingTransformation()%>%
+  t()%>%as.data.frame()%>%
+  rownames_to_column("sample")%>%
+  pivot_longer(-sample)%>%
+  group_by(name)%>%
+  mutate(total = sum(value))%>%
+  #filter(total>1000)%>%
+  ungroup()%>%
+  select(-total)%>%
+  pivot_wider(sample)%>%
+  as.data.frame()%>%
+  column_to_rownames("sample")%>%
+  as.matrix()
+
+#countdata_vst
+
+countdata_vst_integer <- countdata_vst%>%
+  t()%>%as.data.frame()%>%
+  mutate(across(everything(), ~2^.))%>%
+  mutate(across(everything(), round))
+bc_dist = avgdist(countdata_vst_integer, dmethod = "bray", sample = 50000, parallel = 10)
+
+
+nmds = metaMDS(bc_dist, parallel = 10)
+plot_ord(nmds)
+#ggsave("ord/kowt_ord_vst.png")
+```
+
+```{r BC ordinate KOWT}
+
+ordinate_2 <- function(df){
+  dist <- df%>%
+    as.matrix()%>%
+    varianceStabilizingTransformation()%>%
+    t()%>%as.data.frame()%>%
+    rownames_to_column("sample")%>%
+    pivot_longer(-sample)%>%
+    group_by(name)%>%
+    mutate(total = sum(value))%>%
+    #filter(total>1000)%>%
+    ungroup()%>%
+    select(-total)%>%
+    pivot_wider(sample)%>%
+    as.data.frame()%>%
+    column_to_rownames("sample")%>%
+    as.matrix()
+  
+  #nmds = metaMDS(vegdist(dist, method = "bray"))
+  nmds = metaMDS(avgdist(dist, dmethod = "bray",sample = 50000, parallel = 10))
+  return(nmds)
+}
+
+ordinate <- function(df){
+  dist <- df%>%
+    t()%>%as.data.frame()%>%
+    rownames_to_column("sample")%>%
+    pivot_longer(-sample)%>%
+    group_by(name)%>%
+    mutate(total = sum(value))%>%
+    filter(total>1000)%>%
+    ungroup()%>%
+    select(-total)%>%
+    pivot_wider(sample)%>%
+    as.data.frame()%>%
+    column_to_rownames("sample")%>%
+    as.matrix()
+  
+  #nmds = metaMDS(vegdist(dist, method = "bray"))
+  nmds = metaMDS(avgdist(dist, dmethod = "bray",sample = 50000, parallel = 10))
+  return(nmds)
+}
+ 
+plot_ord <- function(nmds, title = "default"){
+    nmds_df <- scores(nmds)%>%
+    as_tibble(rownames = "sample")%>%
+    left_join(metadata%>%rownames_to_column("sample"), by = "sample")
+
+  centroid <- nmds_df%>%
+    group_by(bile_acid)%>%
+    summarize(NMDS1=mean(NMDS1), NMDS2=mean(NMDS2))
+  
+  p1 <- ggplot(nmds_df, aes(NMDS1,NMDS2, color = bile_acid))+
+    geom_point(aes(shape = diet))+
+    geom_text_repel(aes(label = sample), size = 3)+
+    stat_ellipse(aes(color = diet, group = diet))+
+    stat_ellipse(aes(color = bile_acid, group = bile_acid))+
+    #stat_ellipse(aes(color = genotype, group = genotype))+
+    #geom_mark_ellipse(aes(color = bile_acid:genotype))+
+    ggtitle(title)
+  
+    #geom_point(aes(fill = bile_acid), data = centroid, size = 10, shape = 21)
+    
+  
+  return(p1)
+} 
+
+
+
+
+
+nmds_kowt <- ordinate(countdata_kowt)
+
+plot_ord(nmds_kowt)
+#ggsave("ord/kowt_ord_50k.png")
+```
+
+```{r BC ordinate IKOFF}
+nmds_ikoff <- ordinate(countdata_ikoff)
+
+plot_ord(nmds_ikoff)
+#ggsave("ord/ikoff_ord_50k.png")
+```
+
+```{r BC ordinate diets}
+nmds_chow <- ordinate(countdata_chow)
+plot_ord(nmds_chow,"Chow")
+ggsave("ord/6group_chow.png")
+
+nmds_lowfat <- ordinate(countdata_lowfat)
+plot_ord(nmds_lowfat,"Low Fat")
+ggsave("ord/6groups_lowfat.png")
+
+nmds_highfat <- ordinate(countdata_highfat)
+plot_ord(nmds_highfat, "High Fat")
+ggsave("ord/6groups_highfat.png")
+```
+
+
+```{r DESEQ normalized ordination}
+
+dds <- DESeqDataSetFromMatrix(countData = countdata_kowt,
+                       colData = metadata_kowt,
+                       design = ~ genotype + diet + bile_acid + genotype:diet + diet:bile_acid)
+
+dds <- DESeq(dds)
+#dds <- normalizationFactors(dds)
+normalized_counts <- counts(dds, normalized =TRUE)
+
+
+#size_factors <- estimateSizeFactorsForMatrix(countdata_kowt["ENSMUSG00000067274", ])
+#sizeFactors(dds) <- size_factors
+
+
+test = normalized_counts%>%t()%>%as.data.frame()%>%mutate(across(everything(),round))
+
+nmds_normal <- metaMDS(avgdist(test, dmethod = "bray",
+                               sample = 50000, parallel = 10
+                               ))
+
+nmds_vegdist <- metaMDS(vegdist(test, method = "bray",
+                               #sample = 50000, parallel = 10
+                               ))
+
+plot_ord(nmds_vegdist,"kowt deseqnorm no sub")
+ggsave("ord/kowt_deseqnorm_nosub.png")
+plot_ord(nmds_normal, "kowt deseqnorm with sub")
+ggsave("ord/kowt_deseqnorm_sub.png")
+
+```
+
+
+# DEGs Analysis
+```{r deseq everything}
+
+
+
+dds_all <- do_dds(countdata,metadata, ~genotype+diet+bile_acid+genotype:diet+diet:bile_acid)
+
+
+
+res = results(dds_all, list(c("bile_acid_high_vs_low", "diethigh_fat.bile_acidhigh")), alpha = 0.05)
+
+
+
+results = as.data.frame(res)%>%
+  rownames_to_column("ensembl_gene_id")%>%
+  arrange(pvalue)%>%
+  inner_join(ann_df, by = "ensembl_gene_id")%>%
+  na.omit()%>%
+  distinct()%>%
+  group_by(entrezgene_id)%>%
+  summarize(stat=mean(stat))
+
+```
+
+```{r deseq KOL vs WT}
+
+dds_KOLWT <- do_dds(countdata_kowt_low,metadata_kowt_low,~ genotype + diet + genotype:diet)
+
+resultsNames(dds_KOLWT)
+
+res = results(dds_KOLWT, list(c("genotype_KO_vs_WT", "genotypeKO.diethigh_fat")))
+
+
+results_KOLWT = as.data.frame(res)%>%
+  na.omit()%>%
+  rownames_to_column("ensembl_gene_id")%>%
+  arrange(pvalue)%>%
+  inner_join(ann_df, by = "ensembl_gene_id")%>%
+  na.omit()%>%
+  distinct()
+
+```
+
+```{r deseq KOH vs KOL}
+dds_KOH_KOL <- do_dds(countdata_ko, metadata_ko, ~bile_acid + diet + bile_acid:diet)
+
+resultsNames(dds_KOH_KOL)
+
+res = results(dds_KOH_KOL, list(c("bile_acid_high_vs_low","bile_acidhigh.diethigh_fat")))
+
+results_KOH_KOL = as.data.frame(res)%>%
+  na.omit()%>%
+  rownames_to_column("ensembl_gene_id")%>%
+  arrange(pvalue)%>%
+  inner_join(ann_df, by = "ensembl_gene_id")%>%
+  na.omit()%>%
+  distinct()
+```
+```{r deseq KOH vs WTL}
+
+
+
+dds_KOHWTL <- do_dds(countdata_kohwtl, metadata_kohwtl, ~bile_acid + diet + bile_acid:diet)
+
+resultsNames(dds_KOHWTL)
+
+res = results(dds_KOHWTL, list(c("bile_acid_high_vs_low","bile_acidhigh.diethigh_fat")))
+
+results_KOHWTL = as.data.frame(res)%>%
+  na.omit()%>%
+  rownames_to_column("ensembl_gene_id")%>%
+  arrange(pvalue)%>%
+  inner_join(ann_df, by = "ensembl_gene_id")%>%
+  na.omit()%>%
+  distinct()
+```
+
+# FGSEA pathways
+```{r pathways}
+fgsea_run <- function(res_df){
+
+
+
+  results_for_fgsea <- res_df%>%
+    group_by(external_gene_name)%>%
+    summarize(stat=mean(stat))
+  
+  
+  
+  ranks <- deframe(results_for_fgsea)
+  pathways.hallmark <- gmtPathways("data/mh.all.v2023.1.Mm.symbols.gmt")
+  
+  pathways.hallmark%>%
+    head()%>%
+    lapply(head)
+  
+  fgseaRes <- fgsea(pathways=pathways.hallmark, stats=ranks)
+  
+  fgseaResTidy <- fgseaRes %>%
+    as_tibble() %>%
+    arrange(desc(NES))%>%
+    arrange(padj)
+  
+  return(fgseaResTidy)
+}
+
+
+
+
+
+# Show in a nice table:
+
+  #dplyr::select(-ES, -nMoreExtreme) %>% 
+
+```
+
+```{r plot fgsea}
+#old_results_KOLWT <- results_KOLWT
+#old_results_KOHKOL <- results_KOH_KOL
+fgseaResTidy <- fgsea_run(results_KOLWT)
+
+ggplot(fgseaResTidy, aes(reorder(pathway, NES), NES))+
+  geom_col(aes(fill = padj<0.05))+
+  coord_flip()+
+  theme(axis.text=element_text(size=5))+
+  xlab("Pathway")+
+  ylab("Normalized Enrichment Score")+
+  ggtitle("low")
+#ggsave("pathway/pathwayregulationKOLWTL_KOLH1.png")
+
+
+  results_for_fgsea <- results_KOH_KOL%>%
+    group_by(external_gene_name)%>%
+    summarize(stat=mean(stat))
+  
+  
+  
+  ranks <- deframe(results_for_fgsea)
+
+
+
+```
+
+
+
+```{r pathview}
+pathview_2 <- function(gene_data = kegg_data, 
+                       pathways = c("00062"),
+                       out.suffix = "pv", 
+                       save = "KOHKOL"){
+  current_wd <- getwd()
+  save_path <- paste0(current_wd,"/", save)
+  if (!file.exists(save_path)) {
+   dir.create(save_path, recursive = TRUE)  
+  }
+  setwd(save_path)
+  pathview(gene.data = gene_data,
+           pathway.id = pathways,
+           species = "mmu",
+           out.suffix = out.suffix,
+           gene.idtype = "symbol",
+           limit = list(gene = 5),
+           bins = list(gene = 10))
+  setwd(current_wd)
+  return(save_path)
+}
+
+kegg_data_KOH_KOL = setNames(results_KOH_KOL$stat, results_KOH_KOL$external_gene_name)
+
+kegg_data_KOL_WT = setNames(results_KOLWT$stat, results_KOLWT$external_gene_name)
+
+
+pathview_2(gene_data = kegg_data_KOH_KOL,
+           pathways = c("00010","00061","00062","00071","00120","03320","04110","04976","04979"),
+           out.suffix = "KOHKOL_low",
+           save = "KOHKOL"
+           )
+
+
+pathview_2(gene_data = kegg_data_KOL_WT,
+           pathways = c("00010","00061","00062","00071","00120","03320","04110"),
+           out.suffix = "KOHKOL_low",
+           save = "KOLWT"
+           )
+#keggList("pathway", organism = "mmu")
+
+
+```
+
+
+
+
+# Cluster Profiler
+
+```{r cluster profiler, fig.height=8, fig.width=12}
+ddsres_to_df <- function(dds, contrast){
+  results(dds,contrast)%>%
+    as.data.frame()%>%
+    na.omit()%>%
+    rownames_to_column("ensembl_gene_id")%>%
+    arrange(pvalue)%>%
+    inner_join(ann_df, by = "ensembl_gene_id")%>%
+    na.omit()%>%
+    distinct()
+}
+
+
+kohkol_hf <- ddsres_to_df(dds_KOH_KOL, list(c("bile_acid_high_vs_low","bile_acidhigh.diethigh_fat")))
+
+kohkol_hf2 <- kohkol_hf%>%
+  select(entrezgene_id, stat)%>%
+  arrange(desc(stat))%>%
+  #filter(abs(stat)>2)%>%
+  deframe()
+
+  
+
+ego_cc <- gseGO(geneList = kohkol_hf2, OrgDb = org.Mm.eg.db, ont =  "CC")
+goplot(ego_cc)
+
+ego_mf <- gseGO(geneList = kohkol_hf2, OrgDb = org.Mm.eg.db, ont =  "MF")
+goplot(ego_mf)
+
+ego_bp <- gseGO(geneList = kohkol_hf2, OrgDb = org.Mm.eg.db, ont =  "BP")
+goplot(ego_bp)
+
+
+kk <- gseKEGG(kohkol_hf2, organism = "mmu",pvalueCutoff = 1)
+browseKEGG(kk,"mmu03320")
+# 
+# pathview(kohkol_hf2, pathway.id = head(kk$ID), species = "mmu", limit =list(gene=5),out.suffix = "gseKOHKOL")
+
+
+gseDO()
+```
+
+```{r MSigDB, fig.height=12, fig.width=8}
+#msigdbr_show_species()
+msig_df <- msigdbr(species = "Mus musculus", category = "H")%>%
+  select(gs_name, entrez_gene)
+
+kohkol_hf_hmgsea <- GSEA(kohkol_hf2, TERM2GENE=msig_df)
+
+
+dotplot(kohkol_hf_hmgsea%>%arrange(desc(abs(NES))), 
+        showCategory=80,
+        size = "GeneRatio",
+        color = "p.adjust",
+        x = "NES",
+        orderBy = "p.adjust"
+        )
+
+
+
+```
+
+```{r 3 diets}
+resultsNames(dds_KOH_KOL)
+
+
+
+kolwt_h <- ddsres_to_df(dds_KOLWT, list(c("genotype_KO_vs_WT","genotypeKO.diethigh_fat")))%>%
+  select(entrezgene_id, stat)%>%
+  arrange(desc(stat))%>%
+  #filter(abs(stat)>2)%>%
+  deframe()
+
+kolwt_l <- ddsres_to_df(dds_KOLWT, list(c("genotype_KO_vs_WT","genotypeKO.dietlow_fat")))%>%
+  select(entrezgene_id, stat)%>%
+  arrange(desc(stat))%>%
+  #filter(abs(stat)>2)%>%
+  deframe()
+
+kolwt_c <- ddsres_to_df(dds_KOLWT, list(c("genotype_KO_vs_WT")))%>%
+  select(entrezgene_id, stat)%>%
+  arrange(desc(stat))%>%
+  #filter(abs(stat)>2)%>%
+  deframe()
+
+
+kohkol_all <- get_dds_diets(dds_KOH_KOL)
+kolwt_all <- list(c = kolwt_c, hf = kolwt_h, lf =kolwt_l)
+kohwtl_all <- get_dds_diets(dds_KOHWTL)
+
+
+chow_comps <- list(KOHKOL = kohkol_all[[1]], 
+                   KOLWT = kolwt_all[[1]],
+                   KOHWTL = kohwtl_all[[1]])
+
+hf_comps <- list(KOHKOL = kohkol_all[[2]], 
+                 KOLWT = kolwt_all[[2]],
+                 KOHWTL = kohwtl_all[[2]])
+
+lf_comps <- list(KOHKOL = kohkol_all[[3]], 
+                 KOLWT = kolwt_all[[3]],
+                 KOHWTL = kohwtl_all[[3]])
+
+
+# kohkol_hf_hmgsea <- GSEA(kohkol_h, TERM2GENE=msig_df)
+# kohkol_lf_hmgsea <- GSEA(kohkol_l, TERM2GENE=msig_df)
+# kohkol_c_hmgsea <- GSEA(kohkol_c, TERM2GENE=msig_df)
+# 
+
+
+
+
+
+#kolwt_all <- get_dds_diets(dds_KOLWT)
+
+
+
+
+gsea_chow <- compareCluster(chow_comps, fun="GSEA", pvalueCutoff = 1, TERM2GENE = msig_df)
+
+gsea_hf <- compareCluster(hf_comps, fun="GSEA", pvalueCutoff = 1, TERM2GENE = msig_df)
+
+gsea_lf <- compareCluster(lf_comps, fun="GSEA", pvalueCutoff = 1, TERM2GENE = msig_df)
+
+
+gsea_lf@compareClusterResult[["fdr"]] <- log10(gsea_lf@compareClusterResult[["p.adjust"]])
+
+gsea_chow@compareClusterResult[["fdr"]] <- log10(gsea_chow@compareClusterResult[["p.adjust"]])
+
+gsea_hf@compareClusterResult[["fdr"]] <- log10(gsea_hf@compareClusterResult[["p.adjust"]])
+```
+
+```{r plot dots,  fig.height=15, fig.width=20}
+
+
+
+dotplot(gsea_chow,
+        showCategory=50,
+        size = "GeneRatio",
+        color = "fdr",
+        x = "NES"
+         )+
+  facet_grid(~Cluster)+
+  ggtitle("Under Chow")+
+  xlab("Normalized Enrichment Score")+
+  theme(axis.text.y = element_text(size = 10))+
+  scale_color_gradient2(low = "red", 
+                        high = "blue", 
+                        mid = "white", 
+                        midpoint = -1
+                        )
+ggsave("GSEA_chow.png")
+
+dotplot(gsea_hf,
+        showCategory=50,
+        size = "GeneRatio",
+        color = "fdr",
+        x = "NES"
+         )+
+  facet_grid(~Cluster)+
+  ggtitle("Under High Fat")+
+  xlab("Normalized Enrichment Score")+
+  theme(axis.text.y = element_text(size = 10))+
+  scale_color_gradient2(low = "red", 
+                        high = "blue", 
+                        mid = "white", 
+                        midpoint = -1
+                        )
+ggsave("GSEA_hf.png")
+
+dotplot(gsea_lf,
+        showCategory=50,
+        size = "GeneRatio",
+        color = "fdr",
+        x = "NES"
+         )+
+  facet_grid(~Cluster)+
+  ggtitle("Under Low Fat")+
+  xlab("Normalized Enrichment Score")+
+  theme(axis.text.y = element_text(size = 10))+
+  scale_color_gradient2(low = "red", 
+                        high = "blue", 
+                        mid = "white", 
+                        midpoint = -1
+                        )
+ggsave("GSEA_lf.png")
+```
+
+
+```{r pathview}
+
+
+
+pathview_3(gene_data = kohwtl_all[[1]],
+           pathways = c("00010","00061","00062","00071","00120","03320","04110","04976","04979"),
+           out.suffix = "KOHWT_chow",
+           save = "new_kolwt"
+           )
+
+pathview_3(gene_data = kohwtl_all[[2]],
+           pathways = c("00010","00061","00062","00071","00120","03320","04110","04976","04979"),
+           out.suffix = "KOLWT_high",
+           save = "new_kolwt"
+           )
+
+pathview_3(gene_data = kohwtl_all[[3]],
+           pathways = c("00010","00061","00062","00071","00120","03320","04110","04976","04979"),
+           out.suffix = "KOLWT_low",
+           save = "new_kolwt"
+           )
+```
+
+
+
+```{r clustering bp, fig.height=20, fig.width=4}
+
+
+pathway_list = c("HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+                 "HALLMARK_MYC_TARGETS_V2",                
+                 "HALLMARK_MYC_TARGETS_V1",
+                 "HALLMARK_P53_PATHWAY",
+                 "HALLMARK_E2F_TARGETS",
+                 "HALLMARK_G2M_CHECKPOINT",
+                 "HALLMARK_MYOGENESIS",
+                 "HALLMARK_PROTEIN_SECRETION")
+
+
+# kohkol_chow <- do_hmgsea(kohkol_all[[1]])
+# kohkol_hf <- do_hmgsea(kohkol_all[[2]])
+# kohkol_lf <- do_hmgsea(kohkol_all[[3]])
+# 
+# kolwt_chow <- do_hmgsea(kolwt_all[[1]])
+# kolwt_hf <- do_hmgsea(kolwt_all[[2]])
+# kolwt_lf <- do_hmgsea(kolwt_all[[3]])
+# 
+# 
+# kohwtl_chow <- do_hmgsea(kohwtl_all[[1]])
+# kohwtl_hf <- do_hmgsea(kohwtl_all[[2]])
+# kohwtl_lf <- do_hmgsea(kohwtl_all[[3]])
+as.data.frame(gsea_lf)%>%
+  filter(ID == "HALLMARK_MYOGENESIS")%>%
+  mutate(count = str_count(core_enrichment, "/")+1)
+
+
+
+```
+```{r extract data for heatmap of genes per pathway}
+
+entrez_to_symbol_dict = setNames(ann_df$external_gene_name,ann_df$entrezgene_id)
+
+
+
+path_gene_df <- msig_df%>%
+  filter(gs_name %in% pathway_list)%>%
+  group_by(gs_name)%>%
+  summarize(genes = list(unique(entrez_gene)))
+   
+
+
+
+path_gene_df
+path_gene_dict <- setNames(path_gene_df$genes,path_gene_df$gs_name)
+
+
+
+
+extract_clust_genelist <- function(gseares){
+  clustered_genelist <- gseares@geneClusters %>%
+    map_df(~ as.data.frame(t(.x), stringsAsFactors = FALSE))
+
+  rownames(clustered_genelist) <- names(gsea_chow@geneClusters)
+
+  return(clustered_genelist)
+    
+}
+
+clustered_genelist_hf <- extract_clust_genelist(gsea_hf)
+clustered_genelist_lf <- extract_clust_genelist(gsea_lf)
+clustered_genelist_chow <- extract_clust_genelist(gsea_chow)
+
+for (pathway in pathway_list){
+  heatmap_df <- clustered_genelist_chow%>%
+  t()%>%as.data.frame()%>%
+  filter(rownames(.) %in% path_gene_dict[[pathway]])%>%
+  rownames_to_column()%>%
+  mutate(rowname = entrez_to_symbol_dict[rowname])%>%
+  column_to_rownames("rowname")%>%
+  filter(rowSums(is.na(.)) < 2)
+
+  p1 <- Heatmap(heatmap_df,
+          row_names_gp = gpar(fontsize = 4),
+          column_title = paste0(pathway," High Fat"),
+          column_title_gp = gpar(fontsize = 8),
+          name = "Wald statistic",
+          column_names_rot = 45,
+          )
+  
+  
+  CairoPNG(file=paste0("pathwayheatmaps/",pathway,"_chow",".png"),4,15,
+           bg="transparent", dpi = 300, units = "in")
+  
+  draw(p1)
+  
+  dev.off()
+}
+
+
+
+
+```
+```{r plot genes heatmap, fig.width = 4, fig.height = 15}
+
+Heatmap(test, 
+        row_names_gp = gpar(fontsize = 4)
+        )
+
+
+
+```
+
+
+
+```{r apoe, fig.width = 14, fig.height = 8}
+metadata_2 =metadata%>%
+  rownames_to_column("key")
+
+apoe <- count_named%>%
+  filter(external_gene_name == "Vps13a")%>%
+  select(-external_gene_name, -ensembl_gene_id, -description,-entrezgene_id)%>%
+  gather()%>%
+  left_join(metadata_2)%>%
+  mutate(value = as.numeric(value))
+
+ggplot(apoe, aes(x = genotype, y = value, fill = genotype))+
+  geom_boxplot()+
+  facet_grid(~diet)+
+  coord_flip()
+```
+
+
+
+
+```{r cnetplot, fig.width = 12, fig.height = 8}
+cnetplot(kohkol_chow_r, max.overlaps =Inf, node_label_size  = 6)
+ggsave("cnet_kohkol_chow.png")
+
+```
+
+
+
+```{r}
+pathway_list
+```
+
+
+```{r vst heatmap, fig.width = 12, fig.height = 8}
+
+
+# dds <- DESeqDataSetFromMatrix(countData = countdata_kowt,
+#                        colData = metadata_kowt,
+#                        design = ~ b_genotype + diet + diet:b_genotype)
+# 
+# dds <- varianceStabilizingTransformation(dds)
+# 
+# plotCounts(dds, "ENSMUSG00000067274", intgroup = "b_genotype")
+# 
+# assay(dds)
+dds_vst <- do_vst(countdata_kowt, 
+       metadata_kowt, 
+       design = ~b_genotype + diet + diet:b_genotype)
+
+
+dds <-  DESeqDataSetFromMatrix(countData = countdata_kowt,
+                               colData = metadata_kowt,
+                               design = ~b_genotype + diet + diet:b_genotype)
+dds <- dds[rowSums(counts(dds))  > 1]
+dds <- varianceStabilizingTransformation(dds, blind = TRUE)
+dds <- estimateSizeFactors(dds)
+normalized_counts <- counts(dds, normalized =TRUE)
+
+
+
+
+entrezid2ensembl_dict = setNames(ann_df$ensembl_gene_id,ann_df$entrezgene_id)
+
+
+path_gene_df_list <- msig_df%>%
+  filter(gs_name == "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION")%>%
+#  group_by(gs_name)%>%
+  mutate(ensembl_gene_id = entrezid2ensembl_dict[entrez_gene])%>%
+  pull(ensembl_gene_id)
+
+dds_vst_rname = rownames(dds_vst)
+dds_vst_cname = colnames(dds_vst)
+
+
+dds_vst2 <- dds_vst%>%
+  
+  as.data.frame()%>%
+  rownames_to_column("gene")%>%
+  filter(gene %in% path_gene_df_list)%>%
+  mutate(gene = ann_dict[gene])%>%
+  column_to_rownames("gene")%>%
+  apply(1,function(x) x - mean(x))%>%
+  t()
+  
+colnames(dds_vst2) <- dds_vst_cname
+
+
+
+
+
+
+
+
+Heatmap(dds_vst2)
+
+```
+
+
+
+
+
+
+# CHECKPOINT
+```{r deseq genotype diet}
+
+dds = DESeqDataSetFromMatrix(countData = countdata,
+                       colData = metadata,
+                       design = ~ genotype + diet + genotype:diet)
+
+dds$genotype = relevel(dds$genotype, ref = "FF")
+
+dds = dds[rowSums(counts(dds)) >= 100,]
+
+dds = DESeq(dds)
+resultsNames(dds)
+colnames(countdata) == rownames(metadata)
+```
+
+```{r, fig.height=10, fig.width=8 }
+res = results(dds, list(c("genotype_IKO_vs_FF", "genotypeIKO.dietlow_fat")), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=results$ENSEMBL, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+
+results2 <- merge(x=results, y=ann, by= "ENSEMBL", all.x=TRUE)
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$SYMBOL, 
+                pCutoff = 10e-5, 
+                title = 'IKO vs FF low diet',
+                labSize = 3,
+                drawConnectors = TRUE,)
+ggsave("IKO_low.png", dpi = 600)
+```
+
+```{r , fig.height=10, fig.width=8 }
+res = results(dds, list(c("genotype_IKO_vs_WT", "genotypeIKO.diethigh_fat")), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=results$ENSEMBL, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+results2 <- merge(x=results, y=ann, by= "ENSEMBL", all.x=TRUE)
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$SYMBOL, 
+                pCutoff = 10e-6, 
+                title = 'WT vs IKO High Fat diet',
+                labSize = 3,
+                drawConnectors = TRUE,
+                max.overlaps = Inf)
+#ggsave("high_IKO.png", dpi = 600)
+```
+
+```{r genotype effect, fig.height=10, fig.width=8 }
+
+
+
+res = results(dds, c("genotype","KO","WT"), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=results$ENSEMBL, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+results2 <- merge(x=results, y=ann, by= "ENSEMBL", all.x=TRUE)
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$SYMBOL, 
+                pCutoff = 10e-6, 
+                title = 'Genotype effect',
+                labSize = 3,
+                drawConnectors = TRUE,)
+#ggsave("genotypeeffect.png", dpi = 600)
+```
+
+```{r hclust genotype}
+top_DEG = results2%>%
+  arrange((pvalue))%>%
+  slice_head(n = 200)%>%
+  #select("SYMBOL")%>%
+  na.omit()
+
+#DEG_list = c("Rplp0","Acot2", "Acacb","Hmgcs2", "Mogat2","Lgr5","Mt1","Cpt2","Cpt1a","Angptl3","Angptl4","Robo2")
+DEG_list = top_DEG$ENSEMBL
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=DEG_list, columns=c("SYMBOL","GENENAME"))
+
+
+
+mat.z  = apply(
+  countdata%>%filter(rownames(countdata) %in% ann$ENSEMBL), 1 , scale
+  )
+  
+  
+
+rownames(mat.z) = rownames(metadata)
+
+ann_dict = setNames(ann$SYMBOL, ann$ENSEMBL)
+
+colnames(mat.z) <- ann_dict[colnames(mat.z)]
+breaks <- c(seq(-4, 0, length.out = 50),
+            seq(0, 4, length.out = 50)[-1])
+pheatmap(mat.z, 
+         fontsize_col = 15,
+         fontsize_row = 12,
+         cellwidth = 5,
+         cellheight = 10,
+         filename = "heatmap_genotype.png",
+         color = colorRampPalette(rev(brewer.pal(n = 5, name = "RdBu")))(100),
+         breaks = breaks,
+         main = "MGAT2 top DEGs"
+         )
+```
+
+```{r deseq bileacid, echo=FALSE}
+dds = DESeqDataSetFromMatrix(countData = countdata,
+                       colData = metadata,
+                       design = ~ bile_acid + diet + bile_acid:diet)
+
+
+dds = dds[rowSums(counts(dds)) >= 10,]
+
+dds = DESeq(dds)
+resultsNames(dds)
+colnames(countdata) == rownames(metadata)
+```
+
+```{r , fig.height=10, fig.width=8 }
+res = results(dds, list(c("bile_acid_high_vs_low", "bile_acidhigh.dietlow_fat")), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=results$ENSEMBL, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+results2 <- merge(x=results, y=ann, by= "ENSEMBL", all.x=TRUE)
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$SYMBOL, 
+                pCutoff = 10e-6, 
+                title = 'Low Fat diet fix diet',
+                labSize = 3,
+                drawConnectors = TRUE,
+                max.overlaps = Inf)
+ggsave("BA_low_fixdiet.png", dpi = 600)
+```
+
+```{r , fig.height=10, fig.width=8 }
+res = results(dds, list(c("bile_acid_high_vs_low", "bile_acidhigh.diethigh_fat")), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=results$ENSEMBL, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+results2 <- merge(x=results, y=ann, by= "ENSEMBL", all.x=TRUE)
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$SYMBOL, 
+                pCutoff = 10e-6, 
+                title = 'High Fat diet fix diet',
+                labSize = 3,
+                drawConnectors = TRUE,
+                max.overlaps = Inf)
+ggsave("BA_high_fixdiet.png", dpi = 600)
+```
+
+```{r , fig.height=10, fig.width=8 }
+res = results(dds, list(c("diet_low_fat_vs_chow", "bile_acidhigh.dietlow_fat")), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=results$ENSEMBL, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+results2 <- merge(x=results, y=ann, by= "ENSEMBL", all.x=TRUE)
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$SYMBOL, 
+                pCutoff = 10e-6, 
+                title = 'Low Fat diet fix BA',
+                labSize = 3,
+                drawConnectors = TRUE,
+                max.overlaps = Inf)
+ggsave("BA_low_fixBA.png", dpi = 600)
+```
+
+```{r , fig.height=10, fig.width=8 }
+res = results(dds, list(c("diet_high_fat_vs_chow", "bile_acidhigh.diethigh_fat")), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=results$ENSEMBL, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+results2 <- merge(x=results, y=ann, by= "ENSEMBL", all.x=TRUE)
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$SYMBOL, 
+                pCutoff = 10e-6, 
+                title = 'High Fat diet fix BA',
+                labSize = 3,
+                drawConnectors = TRUE,
+                max.overlaps = Inf)
+ggsave("BA_high_fixBA.png", dpi = 600)
+```
+
+```{r genotype, fig.height=10, fig.width=8 }
+res = results(dds, c("bile_acid", "high","low"), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=results$ENSEMBL, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+results2 <- merge(x=results, y=ann, by= "ENSEMBL", all.x=TRUE)
+
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$SYMBOL, 
+                pCutoff = 10e-6, 
+                title = 'Low Fat diet fix BA',
+                labSize = 3,
+                drawConnectors = TRUE,
+                max.overlaps = Inf)
+ggsave("BA_effect.png", dpi = 600)
+```
+
+```{r hclust bileacid, fig.height=15}
+
+
+top_DEG = results2%>%
+  arrange((pvalue))%>%
+  na.omit()%>%
+  slice_head(n = 1000)
+  #select("SYMBOL")%>%
+  
+
+#DEG_list = c("Rplp0","Acot2", "Acacb","Hmgcs2", "Mogat2","Lgr5","Mt1","Cpt2","Cpt1a","Angptl3","Angptl4","Robo2")
+DEG_list = top_DEG$ENSEMBL
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=DEG_list, columns=c("SYMBOL","GENENAME"))
+
+
+
+mat.z  = apply(
+  countdata%>%filter(rownames(countdata) %in% ann$ENSEMBL), 1 , scale
+  )
+  
+  
+
+rownames(mat.z) = rownames(metadata)
+
+ann_dict = setNames(ann$SYMBOL, ann$ENSEMBL)
+
+colnames(mat.z) <- ann_dict[colnames(mat.z)]
+mat.z <- t(mat.z)
+# breaks <- seq(-3, 4, length.out = 100)
+# pheatmap(mat.z, 
+#          fontsize_col = 3,
+#          fontsize_row = 12,
+#          cellwidth = 1,
+#          cellheight = 20,
+#          filename = "heatmap.png",
+#          color = colorRampPalette(rev(brewer.pal(n = 5, name = "RdBu")))(100),
+#          breaks = breaks,
+#          main = "MGAT2 top DEGs"
+#          )
+column_ha = HeatmapAnnotation(
+  Diet = metadata$diet,
+  Bile_acid = metadata$bile_acid,
+  Genotype = metadata$genotype,
+  col = list(
+    Bile_acid = c("low" = "#5778a4", "high" = "#e49444"),
+    Diet = c("low_fat" = "#59A14F", "chow" = "#499894", "high_fat" = "#B6992D"),
+    Genotype = c("WT" = "#FF9D9A", "KO" = "#E15759", "FF" = "#D4A6C8", "IKO" = "#B07AA1")
+  )
+  # col = list(Diet = c(colorRampPalette(brewer.pal(3,"Set1"))(2)),
+  #            Bile_acid = colorRampPalette(brewer.pal(3,"Set3"))(3),
+  #            Genotype = colorRampPalette(brewer.pal(4,"Set2"))(4)
+  #            )
+  )
+```
+
+```{r cairo}
+
+CairoPNG(file="top1000_genotype_sorted.png",30,45,bg="transparent", dpi = 300, units = "in")
+
+ht = Heatmap(mat.z, 
+        top_annotation = column_ha,
+        #col = colorRamp(c(-4,0,4),c(brewer.pal(3,"RdBu"))),
+        heatmap_legend_param = list(title = "Gene Expression"
+                                    #labels_gp = gpar(fontsize = 30),
+                                    ),
+        row_names_gp = gpar(fontsize = 5),
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        raster_device = "CairoPNG",
+        width = unit(20, "in"), height = unit(30, "in"),
+        
+        #raster_quality = 5
+        #use_raster = TRUE, raster_quality = 5)
+)
+
+
+
+draw(ht)
+dev.off()
+ht
+```
+
+```{r, fig.height=20, fig.width = 15}
+
+
+dds = DESeqDataSetFromMatrix(countData = countdata,
+                       colData = metadata,
+                       design = ~ bile_acid + diet + bile_acid:diet)
+
+
+dds = dds[rowSums(counts(dds)) >= 10,]
+
+
+
+
+dds <- dds%>%
+  subset(select = (colData(.)$genotype %in% c("WT","KO")))%>%
+  subset(select = !(colData(.)$genotype == "KO" & colData(.)$bile_acid == "low"))
+  #
+
+dds = DESeq(dds)
+resultsNames(dds)
+colnames(countdata) == rownames(metadata)
+
+res = results(dds, c("bile_acid", "high","low"), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=results$ENSEMBL, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+results2 <- merge(x=results, y=ann, by= "ENSEMBL", all.x=TRUE)
+
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$SYMBOL, 
+                pCutoff = 10e-6, 
+                title = 'Test',
+                labSize = 3,
+                drawConnectors = TRUE,
+                max.overlaps = Inf)
+```
+
+```{r}
+top_DEG = results2%>%
+  arrange((pvalue))%>%
+  na.omit()%>%
+  slice_head(n = 500)
+  #select("SYMBOL")%>%
+  
+
+#DEG_list = c("Rplp0","Acot2", "Acacb","Hmgcs2", "Mogat2","Lgr5","Mt1","Cpt2","Cpt1a","Angptl3","Angptl4","Robo2")
+DEG_list = top_DEG$ENSEMBL
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=DEG_list, columns=c("SYMBOL","GENENAME"))
+
+low_iko = metadata%>%
+  filter(bile_acid == "low" & genotype == "KO" | genotype %in% c("IKO","FF"))%>%
+  rownames()
+
+
+ko_wt_counts = countdata%>%filter(rownames(.) %in% ann$ENSEMBL)%>%
+  t()%>%as.data.frame()%>%
+  filter(!rownames(.) %in% low_iko)%>%
+  t()
+
+ko_wt_cols = colnames(ko_wt_counts)
+
+mat.z  = apply(ko_wt_counts, 1, scale)
+  
+# test = countdata%>%filter(rownames(.) %in% ann$ENSEMBL)%>%
+#   t()%>%as.data.frame()%>%
+#   
+#   filter(!rownames(.) %in% low_iko)%>%
+#   t()%>%as.data.frame()  
+
+rownames(mat.z) = ko_wt_cols
+
+ann_dict = setNames(ann$SYMBOL, ann$ENSEMBL)
+
+colnames(mat.z) <- ann_dict[colnames(mat.z)]
+mat.z <- t(mat.z)
+
+
+ko_wt_meta = metadata%>%
+  filter(!rownames(.) %in% low_iko)
+
+column_ha = HeatmapAnnotation(
+  Diet = ko_wt_meta$diet,
+  Bile_acid = ko_wt_meta$bile_acid,
+  Genotype = ko_wt_meta$genotype,
+  col = list(
+    Bile_acid = c("low" = "#5778a4", "high" = "#e49444"),
+    Diet = c("low_fat" = "#59A14F", "chow" = "#499894", "high_fat" = "#B6992D"),
+    Genotype = c("WT" = "#FF9D9A", "KO" = "#E15759")
+  )
+  # col = list(Diet = c(colorRampPalette(brewer.pal(3,"Set1"))(2)),
+  #            Bile_acid = colorRampPalette(brewer.pal(3,"Set3"))(3),
+  #            Genotype = colorRampPalette(brewer.pal(4,"Set2"))(4)
+  #            )
+  )
+CairoPNG(file="WTKO_500.png",30,45,bg="transparent", dpi = 300, units = "in")
+
+ht = Heatmap(mat.z, 
+        top_annotation = column_ha,
+        #col = colorRamp(c(-4,0,4),c(brewer.pal(3,"RdBu"))),
+        heatmap_legend_param = list(title = "Gene Expression"
+                                    #labels_gp = gpar(fontsize = 30),
+                                    ),
+        row_names_gp = gpar(fontsize = 5),
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        raster_device = "CairoPNG",
+        width = unit(20, "in"), height = unit(30, "in"),
+        
+        #raster_quality = 5
+        #use_raster = TRUE, raster_quality = 5)
+)
+
+
+
+draw(ht)
+dev.off()
+```
+
+```{r, fig.height=20, fig.width = 15}
+
+
+dds = DESeqDataSetFromMatrix(countData = countdata,
+                       colData = metadata,
+                       design = ~ bile_acid + diet + bile_acid:diet)
+
+
+dds = dds[rowSums(counts(dds)) >= 10,]
+
+
+
+
+dds <- dds%>%
+  subset(select = (colData(.)$genotype %in% c("FF","IKO")))%>%
+  subset(select = !(colData(.)$genotype == "IKO" & colData(.)$bile_acid == "low"))
+  #
+
+dds = DESeq(dds)
+resultsNames(dds)
+colnames(countdata) == rownames(metadata)
+
+res = results(dds, c("bile_acid", "high","low"), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=results$ENSEMBL, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+results2 <- merge(x=results, y=ann, by= "ENSEMBL", all.x=TRUE)
+
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$SYMBOL, 
+                pCutoff = 10e-6, 
+                title = 'Test',
+                labSize = 3,
+                drawConnectors = TRUE,
+                max.overlaps = Inf)
+
+
+top_DEG = results2%>%
+  arrange((pvalue))%>%
+  na.omit()%>%
+  slice_head(n = 500)
+  #select("SYMBOL")%>%
+  
+
+
+
+#DEG_list = c("Rplp0","Acot2", "Acacb","Hmgcs2", "Mogat2","Lgr5","Mt1","Cpt2","Cpt1a","Angptl3","Angptl4","Robo2")
+DEG_list = top_DEG$ENSEMBL
+ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=DEG_list, columns=c("SYMBOL","GENENAME"))
+
+low_ko = metadata%>%
+  filter(bile_acid == "low" & genotype == "IKO" | genotype %in% c("WT","KO"))%>%
+  rownames()
+
+
+
+
+iko_wt_counts = countdata%>%filter(rownames(.) %in% ann$ENSEMBL)%>%
+  t()%>%as.data.frame()%>%
+  filter(!rownames(.) %in% low_ko)%>%
+  t()
+
+iko_wt_cols = colnames(iko_wt_counts)
+
+mat.z  = apply(iko_wt_counts, 1, scale)
+  
+# test = countdata%>%filter(rownames(.) %in% ann$ENSEMBL)%>%
+#   t()%>%as.data.frame()%>%
+#   
+#   filter(!rownames(.) %in% low_iko)%>%
+#   t()%>%as.data.frame()  
+
+rownames(mat.z) = iko_wt_cols
+
+ann_dict = setNames(ann$SYMBOL, ann$ENSEMBL)
+
+colnames(mat.z) <- ann_dict[colnames(mat.z)]
+mat.z <- t(mat.z)
+
+
+iko_wt_meta = metadata%>%
+  filter(!rownames(.) %in% low_ko)
+
+column_ha = HeatmapAnnotation(
+  Diet = iko_wt_meta$diet,
+  Bile_acid = iko_wt_meta$bile_acid,
+  Genotype = iko_wt_meta$genotype,
+  col = list(
+    Bile_acid = c("low" = "#5778a4", "high" = "#e49444"),
+    Diet = c("low_fat" = "#59A14F", "chow" = "#499894", "high_fat" = "#B6992D"),
+    Genotype = c("FF" = "#FF9D9A", "IKO" = "#E15759")
+  )
+  # col = list(Diet = c(colorRampPalette(brewer.pal(3,"Set1"))(2)),
+  #            Bile_acid = colorRampPalette(brewer.pal(3,"Set3"))(3),
+  #            Genotype = colorRampPalette(brewer.pal(4,"Set2"))(4)
+  #            )
+  )
+CairoPNG(file="IKOFF_500.png",30,45,bg="transparent", dpi = 300, units = "in")
+
+ht = Heatmap(mat.z, 
+        top_annotation = column_ha,
+        #col = colorRamp(c(-4,0,4),c(brewer.pal(3,"RdBu"))),
+        heatmap_legend_param = list(title = "Gene Expression"
+                                    #labels_gp = gpar(fontsize = 30),
+                                    ),
+        row_names_gp = gpar(fontsize = 5),
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        raster_device = "CairoPNG",
+        width = unit(20, "in"), height = unit(30, "in"),
+        
+        #raster_quality = 5
+        #use_raster = TRUE, raster_quality = 5)
+)
+
+
+
+draw(ht)
+dev.off()
+
+```
+
+```{r}
+# 
+# shapiro_test_row <- function(row_data) {
+#   shapiro.test(row_data)$p.value
+# }
+# 
+# countdata%>%
+#   
+#   filter(rowSums(outer(countdata, countdata, Vectorize(identical))) >= 3)
+# 
+# 
+#   #mutate(shapiro = shapiro_test_row(c_across()))
+# 
+# 
+# test = countdata%>%
+#   rownames_to_column("rownames")%>%
+#   filter(rownames =="ENSMUSG00000052396")
+```
+
+```{r ranking DESeq}
+dds <- DESeqDataSetFromMatrix(countData = countdata,
+                       colData = metadata,
+                       design = ~ genotype + diet + bile_acid + genotype:diet + diet:bile_acid + bile_acid:genotype + genotype:diet:bile_acid)
+
+
+
+dds <- DESeq(dds)
+```
+
+```{r ranking with nbinom}
+
+
+
+
+cleanercount <- countdata%>%
+  filter(apply(., 1, function(row) length(unique(row)) >= 2))%>%
+  filter(rowMeans(.[ncol(.)]) >= 500)
+
+
+
+df_list <- split(cleanercount, seq(nrow(cleanercount)))
+
+fit_negative_binomial <- function(row_data) {
+  fit <- gofstat(fitdist(as.numeric(unlist(row_data)), "nbinom"))
+  return(fit$chisqpvalue)
+}
+
+cl <- makeCluster(24)
+clusterExport(cl, c("df_list", "fit_negative_binomial"))
+clusterEvalQ(cl, library(fitdistrplus))
+
+
+
+fit_summary <- parLapply(cl, df_list, fit_negative_binomial)
+stopCluster(cl)
+
+# fit_list <- countdata %>%
+#   head(30)%>%
+#   rowwise() %>%
+#   mutate(fit = gofstat(fitdist((.),"nbinom"))$chisqpvalue)
+#   
+# fit_list$fit
+# fitdist(unname(unlist(countdata[6,])),"nbinom")
+# 
+t_fit = t(t(fit_summary))
+
+count_fitted = cbind(cleanercount,t_fit)%>%
+  rownames_to_column("gene")%>%
+  select(gene,t_fit)%>%
+  drop_na()%>%
+  mutate(t_fit = unlist(t_fit))%>%
+  arrange(t_fit)
+
+
+getBM_with_NA <- function(values) {
+  
+  result <- getBM(attributes = c("ensembl_gene_id", "external_gene_name","description"),
+          filters = "ensembl_gene_id",
+          values = values,
+          mart = ensembl)
+ if (nrow(result) == 0) {
+    
+    result <- data.frame(matrix(0, nrow = 1, ncol = length(c("ensembl_gene_id", "external_gene_name","description")),
+                      dimnames = list(NULL, c("ensembl_gene_id", "external_gene_name","description"))))
+    result$ensembl_gene_id <- values
+    return(result)
+    
+  }
+  
+  return(result)
+}
+  
+
+
+ann_nbinom <- count_fitted%>%
+  rename("gene" = "ensembl_gene_id")%>%
+  left_join(getBM(attributes = c("ensembl_gene_id", "external_gene_name","description"),
+          filters = "ensembl_gene_id",
+          values = count_fitted$gene,
+          mart = ensembl),
+          by = "ensembl_gene_id")
+          
+
+
+# ann <- AnnotationDbi::select(org.Mm.eg.db, keytype="ENSEMBL", keys=count_fitted$gene, columns=c("ENSEMBL","SYMBOL","GENENAME"))
+# 
+# ann_dict <- setNames(ann$SYMBOL, ann$ENSEMBL)
+# 
+# ann_dict <- ann_dict[!is.na(ann_dict)]
+# 
+# anndbi_nbinom <- count_fitted%>%
+#   rename("gene" = "ENSEMBL")%>%
+#   left_join(ann, by = "ENSEMBL")%>%
+#   na.omit()
+```
+
+```{r ranking test}
+
+
+ranked_genes <- ann_nbinom%>%
+  na.omit()%>%
+  rownames_to_column(var = "row_names")%>%
+  column_to_rownames("ensembl_gene_id")%>%
+  rownames_to_column("ENSEMBL")
+
+
+
+ann_dict <- setNames(ann_nbinom$external_gene_name, ann_nbinom$ensembl_gene_id)
+
+ann_dict <- ann_dict[!is.na(ann_dict)]
+
+
+
+
+top_DEG <- ranked_genes%>%
+  slice_head(n = 200)
+
+DEG_list <- top_DEG$ENSEMBL
+
+low_iko <- metadata%>%
+  filter(bile_acid == "low" & genotype == "KO" | genotype %in% c("FF","IKO"))%>%
+  rownames()
+
+low_ko <- metadata%>%
+  filter(bile_acid == "low" & genotype == "IKO" | genotype %in% c("WT","KO"))%>%
+  rownames()
+
+
+iko_ff_counts <- countdata%>%
+  select(!colnames(.)[colnames(.) %in% low_ko])%>%
+  filter(rownames(.) %in% names(ann_dict))%>%
+  filter(rownames(.) %in% DEG_list)%>%
+  filter(apply(., 1, function(row) length(unique(row)) >= 2))%>%
+  t()%>%as.data.frame()%>%
+  #mutate(across(everything(), ~log2(. + 1)))%>%
+  mutate(across(everything(), ~scale(.)))%>%
+  rename_with(~ann_dict[.])
+
+
+
+ko_wt_counts <- countdata%>%
+  select(!colnames(.)[colnames(.) %in% low_iko])%>%
+  filter(rownames(.) %in% names(ann_dict))%>%
+  filter(rownames(.) %in% DEG_list)%>%
+  filter(apply(., 1, function(row) length(unique(row)) >= 2))%>%
+  t()%>%as.data.frame()%>%
+  #mutate(across(everything(), ~log2(. + 1)))%>%
+  mutate(across(everything(), ~scale(.)))%>%
+  rename_with(~ann_dict[.])
+
+
+iko_ff_cols <-  colnames(iko_ff_counts)
+
+mat.z <- ko_wt_counts%>%
+  t()
+
+
+
+
+
+
+
+iko_ff_meta <- metadata%>%
+  filter(!rownames(.) %in% low_ko)
+
+ko_wt_meta <- metadata%>%
+  filter(!rownames(.) %in% low_iko)
+
+
+column_ha <-  HeatmapAnnotation(
+  Diet = ko_wt_meta$diet,
+  Bile_acid = ko_wt_meta$bile_acid,
+  Genotype = ko_wt_meta$genotype,
+  col = list(
+    Bile_acid = c("low" = "#5778a4", "high" = "#e49444"),
+    Diet = c("low_fat" = "#59A14F", "chow" = "#499894", "high_fat" = "#B6992D"),
+    Genotype = c(
+                 #"FF" = "#FF9D9A", "IKO" = "#E15759",
+                 "WT" = "#D4A6C8", "KO" = "#B07AA1"
+                 )
+  )
+)
+
+
+CairoPNG(file="top200_rbinom_KOWT.png",30,45,bg="transparent", dpi = 300, units = "in")
+
+ht <- Heatmap(mat.z, 
+        top_annotation = column_ha,
+        #col = colorRamp(c(-4,0,4),c(brewer.pal(3,"RdBu"))),
+        heatmap_legend_param = list(title = "Gene Expression"
+                                    #labels_gp = gpar(fontsize = 30),
+                                    ),
+        row_names_gp = gpar(fontsize = 5),
+        show_row_names = TRUE,
+        use_raster = TRUE,
+        raster_device = "CairoPNG",
+        width = unit(20, "in"), height = unit(30, "in"),
+        
+        #raster_quality = 5
+        #use_raster = TRUE, raster_quality = 5)
+)
+ht
+dev.off()
+
+ht
+```
+
+```{r mogat expression}
+mgat <- countdata%>%
+  rownames_to_column("rowname")%>%
+  filter(rowname == "ENSMUSG00000052396")%>%
+  select(!rowname)%>%
+  pivot_longer(cols = everything(), names_to = "rowname")%>%
+  left_join(metadata%>%rownames_to_column(), by = "rowname")
+
+ggplot(mgat, aes(x = rowname, y = value, fill = genotype))+
+  geom_col()+
+  theme(axis.text.x = element_text(angle = -90, vjust = 0.5, hjust=1))+
+  ggtitle("Mogat2 expression")
+
+
+```
+
+
+```{r KO high low}
+dds = DESeqDataSetFromMatrix(countData = countdata_kowt,
+                       colData = metadata%>%filter(genotype %in% c("KO")),
+                       design = ~  diet + bile_acid + diet:bile_acid)
+
+#dds$genotype = relevel(dds$genotype, ref = "FF")
+
+dds = dds[rowSums(counts(dds)) >= 1000,]
+
+dds = DESeq(dds)
+resultsNames(dds)
+#colnames(countdata) == rownames(metadata)
+```
+
+```{r results BA KO high low , fig.height=10, fig.width=8 }
+res = results(dds, c("bile_acid", "high", "low"), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+
+
+results2 <- results%>%
+  rename("ENSEMBL" = "ensembl_gene_id")%>%
+  left_join(ann_dict, by = "ensembl_gene_id")
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$external_gene_name, 
+                pCutoff = 10e-5, 
+                title = 'High vs Low BA in KO only',
+                labSize = 3,
+                drawConnectors = TRUE,)
+ggsave("BA_KO.png", dpi = 600)
+
+```
+
+```{r IKO heatmap}
+
+ann_dict <- setNames(ann_dict$external_gene_name, ann_nbinom$ensembl_gene_id)
+
+ann_dict <- ann_dict[!is.na(ann_dict)]
+
+
+DEG_list = results2%>%
+  arrange(pvalue)%>%
+  select(ensembl_gene_id)%>%
+  slice_head(n=200)
+
+
+ko_counts <- countdata_kowt%>%
+  #select(!colnames(.)[colnames(.) %in% low_iko])%>%
+  filter(rownames(.) %in% names(ann_dict))%>%
+  filter(rownames(.) != "ENSMUSG00000086513")%>%
+  filter(rownames(.) %in% DEG_list$ensembl_gene_id)%>%
+  filter(apply(., 1, function(row) length(unique(row)) >= 2))%>%
+  t()%>%as.data.frame()%>%
+  #mutate(across(everything(), ~log2(. + 1)))%>%
+  mutate(across(everything(), ~scale(.)))%>%
+  rename_with(~ann_dict[.])
+
+
+iko_ff_cols <-  colnames(iko_ff_counts)
+
+mat.z <- ko_counts%>%
+  t()
+
+
+
+
+
+
+
+iko_meta <- metadata%>%
+  filter(rownames(.) %in% iko_list)
+
+ko_meta <- metadata%>%
+  filter(rownames(.) %in% ko_list)
+
+
+column_ha <-  HeatmapAnnotation(
+  Diet = ko_meta$diet,
+  Bile_acid = ko_meta$bile_acid,
+  Genotype = ko_meta$genotype,
+  col = list(
+    Bile_acid = c("low" = "#5778a4", "high" = "#e49444"),
+    Diet = c("low_fat" = "#59A14F", "chow" = "#499894", "high_fat" = "#B6992D")
+    
+  )
+)
+
+
+CairoPNG(file="KO_only.png",30,45,bg="transparent", dpi = 300, units = "in")
+
+ht <- Heatmap(mat.z, 
+        top_annotation = column_ha,
+        #col = colorRamp(c(-4,0,4),c(brewer.pal(3,"RdBu"))),
+        heatmap_legend_param = list(title = "Gene Expression"
+                                    #labels_gp = gpar(fontsize = 30),
+                                    ),
+        row_names_gp = gpar(fontsize = 5),
+        show_row_names = TRUE,
+        use_raster = TRUE,
+        raster_device = "CairoPNG",
+        width = unit(20, "in"), height = unit(30, "in"),
+        
+        #raster_quality = 5
+        #use_raster = TRUE, raster_quality = 5)
+)
+ht
+dev.off()
+
+ht
+
+```
+
+```{r IKO high low}
+
+
+dds = DESeqDataSetFromMatrix(countData = countdata_ikoff,
+                       colData = metadata%>%filter(genotype %in% c("IKO")),
+                       design = ~  diet + bile_acid + diet:bile_acid)
+
+#dds$genotype = relevel(dds$genotype, ref = "FF")
+
+dds = dds[rowSums(counts(dds)) >= 1000,]
+
+dds = DESeq(dds)
+resultsNames(dds)
+#colnames(countdata) == rownames(metadata)
+```
+
+```{r results BA IKO high low , fig.height=10, fig.width=8 }
+res = results(dds, c("bile_acid", "high", "low"), alpha = 0.05)
+#res = res[which(res$padj < 0.05), ]
+results = as.data.frame(res)%>%
+  rownames_to_column("ENSEMBL")
+
+
+
+
+results2 <- results%>%
+  rename("ENSEMBL" = "ensembl_gene_id")%>%
+  left_join(ann_dict, by = "ensembl_gene_id")
+
+
+EnhancedVolcano(results2, x = "log2FoldChange", y = "pvalue", lab = results2$external_gene_name, 
+                pCutoff = 10e-3, 
+                title = 'High vs Low BA in IKO only',
+                labSize = 3,
+                drawConnectors = TRUE,)
+ggsave("BA_IKO.png", dpi = 600)
+
+```
+
+```{r IKO heatmap}
+
+ann_dict <- setNames(ann_dict$external_gene_name, ann_nbinom$ensembl_gene_id)
+
+ann_dict <- ann_dict[!is.na(ann_dict)]
+
+
+DEG_list = results2%>%
+  arrange(pvalue)%>%
+  select(ensembl_gene_id)%>%
+  slice_head(n=200)
+
+
+iko_counts <- countdata_ikoff%>%
+  #select(!colnames(.)[colnames(.) %in% low_iko])%>%
+  filter(rownames(.) %in% names(ann_dict))%>%
+  filter(rownames(.) != "ENSMUSG00000086513")%>%
+  filter(rownames(.) %in% DEG_list$ensembl_gene_id)%>%
+  filter(apply(., 1, function(row) length(unique(row)) >= 2))%>%
+  t()%>%as.data.frame()%>%
+  #mutate(across(everything(), ~log2(. + 1)))%>%
+  mutate(across(everything(), ~scale(.)))%>%
+  rename_with(~ann_dict[.])
+
+
+iko_ff_cols <-  colnames(iko_ff_counts)
+
+mat.z <- iko_counts%>%
+  t()
+
+
+
+
+
+
+
+iko_meta <- metadata%>%
+  filter(rownames(.) %in% ko_list)
+
+ko_meta <- metadata%>%
+  filter(rownames(.) %in% iko_list)
+
+
+column_ha <-  HeatmapAnnotation(
+  Diet = iko_meta$diet,
+  Bile_acid = iko_meta$bile_acid,
+  Genotype = iko_meta$genotype,
+  col = list(
+    Bile_acid = c("low" = "#5778a4", "high" = "#e49444"),
+    Diet = c("low_fat" = "#59A14F", "chow" = "#499894", "high_fat" = "#B6992D")
+    
+  )
+)
+
+
+CairoPNG(file="IKO_only.png",30,45,bg="transparent", dpi = 300, units = "in")
+
+ht <- Heatmap(mat.z, 
+        top_annotation = column_ha,
+        #col = colorRamp(c(-4,0,4),c(brewer.pal(3,"RdBu"))),
+        heatmap_legend_param = list(title = "Gene Expression"
+                                    #labels_gp = gpar(fontsize = 30),
+                                    ),
+        row_names_gp = gpar(fontsize = 5),
+        show_row_names = TRUE,
+        use_raster = TRUE,
+        raster_device = "CairoPNG",
+        width = unit(20, "in"), height = unit(30, "in"),
+        
+        #raster_quality = 5
+        #use_raster = TRUE, raster_quality = 5)
+)
+ht
+dev.off()
+
+ht
+
+```
