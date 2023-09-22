@@ -42,7 +42,7 @@ library(fgsea)
 library(KEGGREST)
 library(enrichplot)
 library(clusterProfiler)
-library(org.Hs.eg.db)
+#library(org.Hs.eg.db)
 library(msigdbr)
 library(ggupset)
 
@@ -176,7 +176,6 @@ ann_df = getBM(attributes = c("ensembl_gene_id", "external_gene_name","descripti
           values = rownames(countdata),
           mart = ensembl)
 
-
 ann_dict <- setNames(ann_df$external_gene_name, ann_df$ensembl_gene_id)
   
 
@@ -190,7 +189,7 @@ count_named = countdata%>%
 
 ```
 
-
+#rerun above from here for setup
 # Ordinal Analysis
 ```{r testing housekeeping gene ratios}
 

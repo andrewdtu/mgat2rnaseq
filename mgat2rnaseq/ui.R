@@ -10,24 +10,56 @@
 library(shiny)
 
 # Define UI for application that draws a histogram
-fluidPage(
-
-    # Application title
-    titlePanel("Old Faithful Geyser Data"),
-
-    # Sidebar with a slider input for number of bins
-    sidebarLayout(
-        sidebarPanel(
-            sliderInput("bins",
-                        "Number of bins:",
-                        min = 1,
-                        max = 50,
-                        value = 30)
-        ),
-
-        # Show a plot of the generated distribution
-        mainPanel(
-            plotOutput("distPlot")
-        )
-    )
-)
+shinyUI(fluidPage(
+  
+  theme = shinytheme("simplex"),
+  
+  # Application title
+  titlePanel("Mogat2 Knockout Mice Gene Expression Under 3 Diets"),
+  
+  # fluidRow(
+  #   column(3, uiOutput('year')),
+  #   column(3, uiOutput('topic')),
+  #   column(3, uiOutput('questions')),
+  #   column(3, uiOutput('datatype'))
+  #   
+  # ),
+  # 
+  # 
+  # 
+  # fluidRow(
+  #   column(4, uiOutput('useDiffButtons')),
+  #   column(4, uiOutput('group1')),
+  #   column(4, uiOutput('group2'))
+  # ),
+  # 
+  
+  tabsetPanel(type = 'tabs',
+              
+              
+              tabPanel("1 Gene",
+                       sidebarLayout(
+                         sidebarPanel(width = 3,
+                                      
+                           textInput("gene", "Input Gene", value = "Mogat2", width = NULL, placeholder = NULL)
+                         ),
+                         mainPanel(
+                           plotOutput("boxplots")
+                         )
+                       )
+                       
+              ),
+              
+              
+              tabPanel("Table",
+                       fluidRow(
+                         dataTableOutput('table')
+                       ),
+              ),      
+              
+  ),
+  
+  fluidRow(
+    textOutput('debug')
+  )
+))
