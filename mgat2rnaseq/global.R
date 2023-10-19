@@ -2,18 +2,21 @@ library(shiny)
 library(tidyverse)
 library(shinythemes)
 library(DT)
-library(plotly)
+#library(plotly)
 
 
 library(tidyverse)
-library(DESeq2)
-library(org.Mm.eg.db)
-library(KEGGREST)
+#library(DESeq2)
+#library(org.Mm.eg.db)
+#library(KEGGREST)
+#library(biomaRt)
+library(gghalves)
+library(ggpubr)
 select <- dplyr::select
 
 
 ##import files
-# remove_list = c("IKOHL_1")
+remove_list = c("IKOHL_1")
 
 metadata = read_csv("metadata.csv")%>%
   column_to_rownames("Sample_ID")%>%
@@ -66,11 +69,12 @@ metadata_2 <- metadata%>%
 
 plot_boxes <- function(gene){
   gene_gg <- count_named%>%
-    filter(external_gene_name == gene)%>%
+    filter(str_detect(str_to_lower(external_gene_name), str_to_lower(gene)))%>%
     select(-external_gene_name, -ensembl_gene_id, -description,-entrezgene_id)%>%
     gather()%>%
     left_join(metadata_2)%>%
-    mutate(value = as.numeric(value))
+    mutate(value = as.numeric(value))%>%
+    mutate(b_genotype = fct_relevel(b_genotype, c("WTL","KOL","KOH")))
   
   
   
@@ -81,9 +85,9 @@ plot_boxes <- function(gene){
     geom_boxplot(position = position_nudge(x = 0.22), width=0.2)+
     geom_half_point(side = "r")+
     facet_grid(geno~diet)+
-    scale_fill_manual(values=c("#4E79A7", "#59A14F", "#F28E2B"),
+    scale_fill_manual(values=c("#4E79A7","#59A14F","#F28E2B"),
                       labels = c("WT Low BA", "M2KO Low BA", "M2KO High BA"))+
-    scale_color_manual(values=c("#4E79A7", "#59A14F", "#F28E2B"))+
+    scale_color_manual(values=c("#4E79A7","#59A14F","#F28E2B"))+
     guides(color = "none")+
     stat_compare_means(method = "kruskal.test")+
     ggtitle("Gene Expression")

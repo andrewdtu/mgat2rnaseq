@@ -60,6 +60,17 @@ assert <- function(a, b){
   } 
 }
 
+ddsres_to_df <- function(dds, contrast){
+  results(dds,contrast)%>%
+    as.data.frame()%>%
+    na.omit()%>%
+    rownames_to_column("ensembl_gene_id")%>%
+    arrange(pvalue)%>%
+    inner_join(ann_df, by = "ensembl_gene_id")%>%
+    na.omit()%>%
+    distinct()
+}
+
 get_dds_diets <- function(dds){
   res_h <- ddsres_to_df(dds, list(c("bile_acid_high_vs_low","bile_acidhigh.diethigh_fat")))%>%
     select(entrezgene_id, stat)%>%
@@ -179,6 +190,17 @@ do_vst <- function(count, meta, design, n_cutoff = 1){
                                  design = design)
   dds <- dds[rowSums(counts(dds))  > n_cutoff]
   dds <- varianceStabilizingTransformation(dds, blind = TRUE)
+  #normalized_counts <- counts(dds, normalized =TRUE)
+  return(assay(dds))
+}
+
+do_dds_norm <- function(count, meta, design, n_cutoff = 1){
+  dds <-  DESeqDataSetFromMatrix(countData = count,
+                                 colData = meta,
+                                 design = design)
+  
+  dds <- dds[rowSums(counts(dds))  > n_cutoff]
+  dds <- estimateSizeFactors(dds)
   normalized_counts <- counts(dds, normalized =TRUE)
   return(normalized_counts)
 }
@@ -198,4 +220,19 @@ heatplot_vst <- function(gsearesult,genelist,name){
                                      size = 8),)
   
   ggsave(paste0(name,".png"), dpi = 600, width = 8, height = 20)    
+}
+
+transpose_dataframe <- function(df) {
+  # Store original column and row names
+  col_names <- colnames(df)
+  row_names <- rownames(df)
+  
+  # Transpose the dataframe to a matrix, then back to a dataframe
+  df_transposed <- as.data.frame(t(as.matrix(df)))
+  
+  # Reassign the original column and row names
+  colnames(df_transposed) <- row_names
+  rownames(df_transposed) <- col_names
+  
+  return(df_transposed)
 }

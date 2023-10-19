@@ -115,7 +115,7 @@ ggplot(gene_gg, aes(x = b_genotype, y = value, color = b_genotype))+
   guides(color = "none")+
   stat_compare_means(comparisons = comparisons, method = "wilcox.test", hide.ns = TRUE)
 
-
+factor(gene_gg$)
 
 plot_boxes("Vps13a")
 ```
