@@ -1086,47 +1086,9 @@ draw(hm)
 
 ```
 
-```{r}
-anno_order = match(rownames(dds_vst3), rownames(metadata_3))
-anno_df = metadata_3[anno_order, , drop = FALSE]
-
-# Create HeatmapAnnotation object
-col_anno = HeatmapAnnotation(
-  Diet = anno_df$diet,
-  Bile_acid = anno_df$bile_acid,
-  Genotype = anno_df$genotype,
-  col = list(
-    Bile_acid = c("low" = "#5778a4", "high" = "#e49444"),
-    Diet = c("low_fat" = "#59A14F", "chow" = "#499894", "high_fat" = "#B6992D"),
-    Genotype = c("WT" = "#FF9D9A", "KO" = "#E15759", "FF" = "#D4A6C8", "IKO" = "#B07AA1")
-  )
-)
-
-# Generate the heatmap
-Heatmap(transpose_dataframe(dds_vst3), name = "Expression",
-        cluster_columns = FALSE,
-        bottom_annotation = col_anno)
-```
 
 
-```{r}
-set.seed(123)
-mat = matrix(rnorm(80, 2), 8, 10)
-mat = rbind(mat, matrix(rnorm(40, -2), 4, 10))
-rownames(mat) = paste0("R", 1:12)
-colnames(mat) = paste0("C", 1:10)
 
-chr = sample(paste0("chr", 1:20), nrow(mat), replace = TRUE)
-chr_level = intersect(paste0("chr", 1:20), chr)
-ha_chr = rowAnnotation(chr = chr,
-                       annotation_legend_param = list(chr = list(
-                       	
-                       	)),
-                       width = unit(5, "mm"))
-ht1 = Heatmap(mat, name = "ht1")
-ht1 + ha_chr
-
-```
 
 
 

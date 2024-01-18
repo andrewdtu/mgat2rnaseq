@@ -55,7 +55,28 @@ shinyUI(fluidPage(
                        fluidRow(
                          dataTableOutput('table')
                        ),
-              ),      
+              ),
+              
+              tabPanel("Heatmap",
+                       fluidRow(
+                         sidebarPanel(width = 3,
+                                      selectInput("pathway", "select a pathway", choices = pathwaylist)
+                         ),
+                         mainPanel(
+                           plotOutput("heatmap", width = "12in", height = "10in")
+                         )
+                       )
+               ),
+              tabPanel("Enrichment",
+                       
+                       
+                       fluidRow(
+                         column(12, style = "height: 800px;", imageOutput("gsea_chow")),
+                         column(12, style = "height: 800px;", imageOutput("gsea_hf")),
+                         column(12, style = "height: 800px;", imageOutput("gsea_lf")),
+                       )
+                       
+               )
               
   ),
   

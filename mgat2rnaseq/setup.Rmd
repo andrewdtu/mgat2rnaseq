@@ -21,6 +21,8 @@ library(biomaRt)
 library(gghalves)
 library(ggpubr)
 select <- dplyr::select
+
+source("global.R", local = knitr::knit_global())
 ```
 
 
@@ -115,8 +117,34 @@ ggplot(gene_gg, aes(x = b_genotype, y = value, color = b_genotype))+
   guides(color = "none")+
   stat_compare_means(comparisons = comparisons, method = "wilcox.test", hide.ns = TRUE)
 
-factor(gene_gg$)
+
 
 plot_boxes("Vps13a")
+```
+
+```{r heatmap}
+write_csv(msig_df, "msig_df.csv")
+unique(msig_df$gs_name)
+
+
+write.csv(dds_vst2, "dds_matrix.csv")
+
+test_m <- read.csv("dds_matrix.csv",row.names = 1)
+
+
+all(dds_vst2 == test_m)
+```
+
+
+```{r test heatmap}
+generate_path_gene_list("HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION")
+generate_heatmap(process_dds_vst(generate_path_gene_list("HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION")))
+
+count_named%>%
+    filter(str_detect(external_gene_name, regex(paste0("\\b", "1700047N06Rik", "\\b"), ignore_case = TRUE)))
+
+count_named%>%
+  select(external_gene_name)%>%
+  filter(grepl("^[0-9]+[A-Za-z].*$", external_gene_name))
 ```
 
